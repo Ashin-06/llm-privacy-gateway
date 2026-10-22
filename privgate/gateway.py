@@ -137,10 +137,14 @@ async def messages(request: Request, x_privgate_user: str = Header("anonymous"),
     for block in out.get("content", []):
         if block.get("type") != "text":
             continue
-        for e in engine.leaked(block["text"]):
+        block_leaks = engine.leaked(block["text"])
+        for e in block_leaks:
             leaks[e.type] = leaks.get(e.type, 0) + 1
-        if leaks and mask_leaks:
-            block["text"] = engine.sanitize(block["text"], cid, raise_on_block=False).text
+        if block_leaks and mask_leaks:
+            txt = block["text"]
+            for e in reversed(block_leaks):
+                txt = txt[: e.start] + f"[REDACTED:{e.type}]" + txt[e.end :]
+            block["text"] = txt
         block["text"], stats = engine.restore(block["text"], cid, x_privgate_role)
         for k, v in stats.items():
             restored[k] = restored.get(k, 0) + v
