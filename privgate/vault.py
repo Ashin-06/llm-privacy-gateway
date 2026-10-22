@@ -28,6 +28,7 @@ def _key() -> bytes:
 @dataclass
 class Conversation:
     created: float = field(default_factory=time.time)
+    owner: str | None = None  # user who created the conversation; only they get values back
     by_value: dict[tuple[str, str], str] = field(default_factory=dict)  # (type, normalised value) -> placeholder
     sealed: dict[str, bytes] = field(default_factory=dict)  # placeholder -> nonce + ciphertext
     counters: dict[str, int] = field(default_factory=dict)
@@ -63,6 +64,18 @@ class Vault:
             c.sealed[ph] = nonce + self.aead.encrypt(nonce, value.encode(), f"{cid}|{ph}".encode())
             c.by_value[key] = ph
             return ph
+
+    def claim(self, cid: str, user: str | None) -> bool:
+        """Bind a conversation to its first user. Returns False if someone else owns it."""
+        c = self._conv(cid)
+        with self._lock:
+            if c.owner is None:
+                c.owner = user
+            return user is None or c.owner in (None, user)
+
+    def owner(self, cid: str) -> str | None:
+        c = self.convs.get(cid)
+        return c.owner if c else None
 
     def reveal(self, cid: str, placeholder: str) -> str | None:
         c = self.convs.get(cid)

@@ -62,7 +62,7 @@ If the model produces an identifier that didn't come from a placeholder (it gues
 
 ```bash
 pip install -r requirements.txt
-python -m pytest -q                      # 8 tests, including a full proxy round-trip with a stub model
+python -m pytest -q                      # 9 tests, including full proxy round-trips with a stub model
 python -m privgate serve                 # gateway + playground on http://127.0.0.1:8010
 python -m privgate scan ticket.txt       # what would be detected
 python -m privgate mask ticket.txt       # sanitised text
@@ -76,7 +76,7 @@ import anthropic
 
 client = anthropic.Anthropic(
     base_url="http://127.0.0.1:8010",
-    default_headers={"x-privgate-user": "agent.meera", "x-privgate-role": "support"},
+    api_key="<gateway key issued to this employee or app>",   # not an Anthropic key
 )
 reply = client.messages.create(
     model="claude-opus-5-5",
@@ -89,8 +89,23 @@ To keep placeholders stable across turns, reuse the `x-privgate-conversation` va
 
 The gateway calls Anthropic with its own credentials (`ANTHROPIC_API_KEY` on the gateway host), so employees never hold the key.
 
+### Who is calling
+
+Issue each employee or app a **gateway key** and list them in `PRIVGATE_KEYS_FILE` (or the `PRIVGATE_API_KEYS` variable):
+
+```json
+{"k-7f3c...": {"user": "agent.meera", "role": "support"},
+ "k-91aa...": {"user": "ravi.k", "role": "fraud_analyst"}}
+```
+
+- The key decides the user and role. `x-privgate-user` / `x-privgate-role` headers are ignored, so nobody can promote themselves to a role that sees more.
+- A conversation belongs to the user who started it. Another user can't continue it or restore its values, even with a broader role.
+- Keys are held in memory only as SHA-256 hashes. `/v1/messages`, `/v1/sanitize`, `/v1/restore` and `/v1/audit` all require one.
+- **With no keys configured the gateway runs in demo mode:** the identity headers are trusted, which is fine for the local playground and nothing else. `GET /healthz` shows which mode is active.
+
 | Setting | Purpose |
 |---|---|
+| `PRIVGATE_KEYS_FILE` / `PRIVGATE_API_KEYS` | gateway keys and the identity each one carries (see above) |
 | `PRIVGATE_VAULT_KEY` | base64 AES-256 key, so placeholders survive restarts and work across replicas (default: random per process) |
 | `PRIVGATE_AUDIT_KEY` | HMAC key for the audit chain |
 | `PRIVGATE_AUDIT_LOG` | audit file path (default `data/audit.jsonl`) |

@@ -13,6 +13,8 @@ Headers:  x-privgate-user, x-privgate-role, x-privgate-conversation (reuse to ke
 from __future__ import annotations
 
 import copy
+import hashlib
+import json
 import os
 import time
 import uuid
@@ -26,6 +28,36 @@ from .audit import Audit
 from .engine import Blocked, Engine
 
 ROOT = Path(__file__).resolve().parent.parent
+
+
+def _load_keys() -> dict[str, dict]:
+    """Gateway keys -> identity. PRIVGATE_KEYS_FILE (JSON file) or PRIVGATE_API_KEYS (JSON
+    string): {"<key>": {"user": "meera", "role": "support"}}. Keys are held only as SHA-256."""
+    raw = None
+    if os.environ.get("PRIVGATE_KEYS_FILE"):
+        raw = Path(os.environ["PRIVGATE_KEYS_FILE"]).read_text(encoding="utf-8")
+    elif os.environ.get("PRIVGATE_API_KEYS"):
+        raw = os.environ["PRIVGATE_API_KEYS"]
+    if not raw:
+        return {}
+    return {hashlib.sha256(k.encode()).hexdigest(): {"user": str(v["user"]), "role": str(v["role"])}
+            for k, v in json.loads(raw).items()}
+
+
+KEYS = _load_keys()
+
+
+def identify(request: Request) -> tuple[str, str]:
+    """Who is calling. With keys configured the key decides user and role, and the
+    x-privgate-user / x-privgate-role headers are ignored. Without keys (local demo
+    mode) the headers are trusted."""
+    if KEYS:
+        token = request.headers.get("x-api-key") or request.headers.get("authorization", "").removeprefix("Bearer ").strip()
+        ident = KEYS.get(hashlib.sha256(token.encode()).hexdigest()) if token else None
+        if ident is None:
+            raise HTTPException(401, "missing or unknown gateway key")
+        return ident["user"], ident["role"]
+    return request.headers.get("x-privgate-user", "anonymous"), request.headers.get("x-privgate-role", "developer")
 engine = Engine(os.environ.get("PRIVGATE_POLICY", ROOT / "policy.toml"))
 audit = Audit(os.environ.get("PRIVGATE_AUDIT_LOG", ROOT / "data" / "audit.jsonl"))
 app = FastAPI(title="LLM Privacy Gateway", version="1.0")
@@ -88,11 +120,13 @@ def _walk_json(obj, fn):
 
 
 @app.post("/v1/messages")
-async def messages(request: Request, x_privgate_user: str = Header("anonymous"), x_privgate_role: str = Header("developer"),
-                   x_privgate_conversation: str | None = Header(None)):
+async def messages(request: Request, x_privgate_conversation: str | None = Header(None)):
     t0 = time.time()
+    x_privgate_user, x_privgate_role = identify(request)
     body = await request.json()
     cid = x_privgate_conversation or uuid.uuid4().hex
+    if not engine.vault.claim(cid, x_privgate_user):
+        raise HTTPException(403, "this conversation belongs to another user")
     model = body.get("model", "")
     allowed_models = {m for d in engine.policy.get("destinations", {}).values() for m in d.get("models", [])}
     if allowed_models and model not in allowed_models:
@@ -145,7 +179,7 @@ async def messages(request: Request, x_privgate_user: str = Header("anonymous"),
             for e in reversed(block_leaks):
                 txt = txt[: e.start] + f"[REDACTED:{e.type}]" + txt[e.end :]
             block["text"] = txt
-        block["text"], stats = engine.restore(block["text"], cid, x_privgate_role)
+        block["text"], stats = engine.restore(block["text"], cid, x_privgate_role, x_privgate_user)
         for k, v in stats.items():
             restored[k] = restored.get(k, 0) + v
     audit.write(user=x_privgate_user, role=x_privgate_role, conversation=cid, model=model, status="ok",
@@ -161,8 +195,11 @@ class TextIn(BaseModel):
 
 
 @app.post("/v1/sanitize")
-def sanitize_preview(body: TextIn):
+def sanitize_preview(request: Request, body: TextIn):
+    user, _ = identify(request)
     cid = body.conversation or uuid.uuid4().hex
+    if not engine.vault.claim(cid, user):
+        raise HTTPException(403, "this conversation belongs to another user")
     r = engine.sanitize(body.text, cid, raise_on_block=False)
     blocked = sorted({e.type for e in r.entities if engine.action(e.type) == "block"})
     return {"conversation": cid, "sanitized": r.text, "blocked": blocked,
@@ -171,17 +208,27 @@ def sanitize_preview(body: TextIn):
 
 
 @app.post("/v1/restore")
-def restore(body: TextIn):
+def restore(request: Request, body: TextIn):
     if not body.conversation:
         raise HTTPException(400, "conversation is required")
-    text, stats = engine.restore(body.text, body.conversation, body.role)
+    user, role = identify(request)
+    if not KEYS and body.role:
+        role = body.role  # demo mode only: the playground picks a role to show the difference
+    text, stats = engine.restore(body.text, body.conversation, role, user)
     return {"text": text, "stats": stats}
 
 
 @app.get("/v1/audit")
-def audit_log(limit: int = 100):
+def audit_log(request: Request, limit: int = 100):
+    identify(request)
     ok, msg = audit.verify()
-    return {"verified": ok, "message": msg, "entries": audit.entries[-min(limit, 1000):]}
+    return {"verified": ok, "message": msg, "entries": audit.entries[-max(1, min(limit, 1000)):]}
+
+
+@app.get("/healthz")
+def health():
+    return {"ok": True, "auth": "gateway keys" if KEYS else "demo mode: x-privgate-user/role headers are trusted",
+            "approved_models": sorted({m for d in engine.policy.get("destinations", {}).values() for m in d.get("models", [])})}
 
 
 @app.get("/")

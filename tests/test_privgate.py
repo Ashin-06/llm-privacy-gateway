@@ -108,3 +108,32 @@ def test_proxy_end_to_end(tmp_path, monkeypatch):
     assert bad.status_code == 403
     blocked = c.post("/v1/messages", json={**body, "messages": [{"role": "user", "content": "otp is 482913"}]})
     assert blocked.status_code == 422
+
+
+def test_gateway_keys_decide_identity(tmp_path, monkeypatch):
+    keys = {"k-support": {"user": "meera", "role": "support"}, "k-fraud": {"user": "ravi", "role": "fraud_analyst"}}
+    monkeypatch.setenv("PRIVGATE_API_KEYS", json.dumps(keys))
+    monkeypatch.setenv("PRIVGATE_AUDIT_LOG", str(tmp_path / "audit.jsonl"))
+    import importlib
+
+    import privgate.gateway as gw
+
+    importlib.reload(gw)
+    fake = _FakeMessages()
+    gw.set_upstream(SimpleNamespace(messages=fake, beta=SimpleNamespace(messages=fake)))
+    c = TestClient(gw.app)
+    body = {"model": "claude-opus-5-5", "max_tokens": 500,
+            "messages": [{"role": "user", "content": f"Customer name: Priya Sharma, card {CARD}. Draft a refund note."}]}
+    assert c.post("/v1/messages", json=body).status_code == 401
+    # a support key claiming to be a fraud analyst still gets support visibility
+    r = c.post("/v1/messages", json=body, headers={"x-api-key": "k-support", "x-privgate-role": "fraud_analyst"})
+    assert r.status_code == 200 and "[[CARD_1:1111]]" in r.json()["content"][0]["text"]
+    cid = r.headers["x-privgate-conversation"]
+    # another user cannot reuse or restore the conversation, even with a broader role
+    assert c.post("/v1/messages", json=body, headers={"x-api-key": "k-fraud", "x-privgate-conversation": cid}).status_code == 403
+    out = c.post("/v1/restore", json={"text": "[[PERSON_1]]", "conversation": cid}, headers={"x-api-key": "k-fraud"}).json()
+    assert out["text"] == "[[PERSON_1]]" and out["stats"]["not_conversation_owner"] == 1
+    assert c.get("/v1/audit").status_code == 401
+    assert c.get("/healthz").json()["auth"] == "gateway keys"
+    monkeypatch.delenv("PRIVGATE_API_KEYS")
+    importlib.reload(gw)

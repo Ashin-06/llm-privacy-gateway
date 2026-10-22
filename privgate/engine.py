@@ -63,9 +63,15 @@ class Engine:
         out.append(text[last:])
         return Result("".join(out), ents, acts)
 
-    def restore(self, text: str, cid: str, role: str | None) -> tuple[str, Counter]:
+    def restore(self, text: str, cid: str, role: str | None, user: str | None = None) -> tuple[str, Counter]:
+        """Put original values back for the kinds `role` may see. When `user` is given,
+        only the conversation's owner gets anything back."""
         allowed = set(self.policy.get("roles", {}).get(role or "", {}).get("reveal", []))
         stats = Counter()
+        owner = self.vault.owner(cid)
+        if user is not None and owner is not None and owner != user:
+            allowed = set()
+            stats["not_conversation_owner"] += 1
 
         def swap(m: re.Match) -> str:
             kind = m.group(1)
