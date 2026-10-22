@@ -1,0 +1,53 @@
+# What happens to each kind of data before a prompt leaves the bank.
+#   tokenize  replace with a reversible placeholder ([[PAN_1]]), restorable for allowed roles
+#   redact    replace with an irreversible marker ([REDACTED:CVV]); never stored
+#   block     refuse the whole request
+#   allow     send as is
+
+[actions]
+AADHAAR = "tokenize"
+CARD = "tokenize"
+CVV = "block"
+OTP = "block"
+PAN = "tokenize"
+GSTIN = "allow"         # business identifier, public by design
+IFSC = "allow"          # branch code, public
+ACCOUNT = "tokenize"
+PHONE = "tokenize"
+EMAIL = "tokenize"
+UPI_ID = "tokenize"
+PASSPORT = "tokenize"
+VOTER_ID = "tokenize"
+DOB = "tokenize"
+PERSON = "tokenize"
+SECRET = "block"
+
+# Placeholder hints the model may see (helps it reason without the full value)
+[hints]
+CARD = "last4"          # [[CARD_1:4242]]
+ACCOUNT = "last4"
+PHONE = "none"
+
+# Which roles get original values back in the model's reply
+[roles.support]
+reveal = ["PERSON", "PHONE", "EMAIL", "ACCOUNT", "UPI_ID"]
+
+[roles.fraud_analyst]
+reveal = ["PERSON", "PHONE", "EMAIL", "ACCOUNT", "UPI_ID", "PAN", "CARD", "AADHAAR"]
+
+[roles.developer]
+reveal = []
+
+# Destinations. Internal models may receive raw data; external ones only sanitised text.
+[destinations.anthropic]
+external = true
+models = ["claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5", "claude-fable-5-1"]
+
+[limits]
+max_prompt_chars = 400000
+min_confidence = 0.6
+
+# Bank-specific identifiers, e.g. customer and loan numbers
+[custom_patterns]
+CUSTOMER_ID = "\\bCIF\\d{8}\\b"
+LOAN_ID = "\\bLN-\\d{4}-\\d{6}\\b"
