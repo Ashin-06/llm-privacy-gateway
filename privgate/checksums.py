@@ -60,6 +60,15 @@ def gstin_valid(g: str) -> bool:
     return len(g) == 15 and all(c in _GST_CHARS for c in g) and gstin_check_char(g[:14]) == g[14]
 
 
+def iban_valid(iban: str) -> bool:
+    """ISO 13616 / ISO 7064 mod 97-10: move the first four characters to the end, letters
+    become 10..35, and the whole number must leave remainder 1 when divided by 97."""
+    s = iban.replace(" ", "").upper()
+    if not (15 <= len(s) <= 34 and s[:2].isalpha() and s[2:4].isdigit() and s.isalnum()):
+        return False
+    return int("".join(str(int(c, 36)) for c in s[4:] + s[:4])) % 97 == 1
+
+
 def card_network(digits: str) -> str | None:
     n = len(digits)
     if digits.startswith("4") and n in (13, 16, 19):
