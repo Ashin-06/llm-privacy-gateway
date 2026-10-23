@@ -16,14 +16,14 @@ employee / app ──► gateway ──(sanitised)──► Claude
 | Type | How it is confirmed |
 |---|---|
 | Aadhaar | 12 digits, first 2–9, **Verhoeff check digit**. Labelled Aadhaar with a bad check digit is still caught, at lower confidence. |
-| Card | 13–19 digits, **Luhn** plus a known **network prefix** (Visa, Mastercard, RuPay, Amex, Diners) |
+| Card | 13–19 digits, **Luhn** plus a known **network prefix** (Visa, Mastercard, RuPay, Amex, Diners); a number whose nearest label is "card" is masked even if the checksum fails |
 | PAN | `AAAAA9999A` with a valid **holder-type** letter (P, C, H, F, A, T, B, L, J, G) |
 | GSTIN | state code + PAN + **mod-36 check character** |
-| Bank account | 9–18 digits only when the *closest* label before it is an account label (a/c, account no, beneficiary...), not UTR / order / ticket / phone |
-| CVV, OTP, PIN | value after the label (`otp is 482913`, `cvv: 123`) |
+| Bank account | 9–18 digits only when the *closest* label before it is an account label (a/c, account no, beneficiary...), not UTR / order / ticket / phone. **IBANs** by the ISO 7064 **mod-97** check (or an IBAN label); labelled BBANs |
+| CVV, OTP, PIN | value after the label (`otp is 482913`, `cvv: 123`, `security code: 624`) |
 | UPI ID | `name@handle` with a real PSP handle (okaxis, ybl, paytm...), not email addresses |
-| Phone, email, DOB, passport, voter ID, IFSC | format plus context |
-| Names | honorifics (Mr., Smt., Dr.) and labels (customer name, beneficiary, applicant, nominee) |
+| Phone, email, DOB, passport, voter ID, IFSC | format plus context; international phones (`(123) 456-7890`, `+44 ...`) when the nearest label is a phone label; any passport number after a passport label |
+| Names | honorifics (Mr., Smt., Dr.) and labels (customer name, beneficiary, applicant, nominee, policyholder, Dear ...), with initials and non-English letters |
 | Secrets | AWS keys, private-key blocks, GitHub tokens, JWTs, API keys, `password=` |
 | Your own IDs | regexes in `policy.toml` (`CIF12345678`, loan numbers...) |
 
@@ -37,6 +37,36 @@ Benchmark (`python -m privgate bench`, 600 generated support tickets, chat logs 
 | PAN, GSTIN, IFSC, UPI, phone, email, OTP, CVV, DOB, names | 1.000 / 1.000 | mostly not detected |
 
 The naive detector treats every 12-digit number as Aadhaar and every 16-digit number as a card. That is why typical DLP rules swamp teams with false positives, or get switched off. Checksums and label proximity fix it. The corpus comes from templates, so expect lower recall on free-form text, especially names; see Limits.
+
+### On realistic bank documents
+
+The benchmark above is template text. To test realistic documents I used [Gretel's financial PII dataset](https://huggingface.co/datasets/gretelai/synthetic_pii_finance_multilingual) (Apache-2.0): loan applications, SWIFT messages, statements and claims, with every identifier labelled. These are LLM-written documents about invented people, the closest legal stand-in, since real customer identifiers cannot be published. Most of the documents are US and European, so identifiers outside the Indian formats above show up here. Command: `python -m privgate realdata`; results in `results/real_data.json`.
+
+The first run masked only **12%** of the identifiers the gateway targets. Patterns were then added using a sample of Gretel's **train** split; the numbers below are on its **held-out test split** (2,891 English documents).
+
+| Identifier | Labelled | Masked before → after |
+|---|---|---|
+| IBAN | 69 | 9% → **99%** |
+| Email | 330 | 95% → 95% |
+| Date of birth | 126 | 54% → 83% |
+| Phone | 480 | 2% → **79%** |
+| Card number | 83 | 52% → 78% |
+| Passport | 76 | 1% → 54% |
+| Card security code | 76 | 0% → 38% |
+| Bank PIN | 80 | 41% → 41% |
+| BBAN | 93 | 13% → 39% |
+| Names | 3,730 | 4% → **23%** |
+| API keys, passwords | 101 | 21% → 22% |
+| **All targeted identifiers** | | **12% → 37.5%** |
+
+Also on this data:
+- **About 65% of what the gateway masks sits on a labelled identifier.** The labels miss some PII, so this is a lower bound on precision.
+- **The Indian benchmark above is unchanged** after these additions.
+
+What this says:
+- **Checksummed and labelled identifiers are now handled well.**
+- **Names are the gap.** Three quarters of the names in ordinary prose have no honorific or label for a pattern to anchor on. Before relying on the gateway for free text, add a named-entity model (see Limits); it is the biggest single improvement available.
+- **US SSNs, driver's licences, street addresses, routing numbers and company names are not targeted** and pass through. Add them to `custom_patterns` or `policy.toml` if your traffic carries them.
 
 ## What happens to each value (`policy.toml`)
 
@@ -62,7 +92,8 @@ If the model produces an identifier that didn't come from a placeholder (it gues
 
 ```bash
 pip install -r requirements.txt
-python -m pytest -q                      # 9 tests, including full proxy round-trips with a stub model
+python -m pytest -q                      # 12 tests, including full proxy round-trips with a stub model
+python -m privgate realdata --gretel English_test-00000-of-00001.parquet
 python -m privgate serve                 # gateway + playground on http://127.0.0.1:8010
 python -m privgate scan ticket.txt       # what would be detected
 python -m privgate mask ticket.txt       # sanitised text
@@ -133,6 +164,6 @@ Entries are hash-chained (HMAC-keyed when `PRIVGATE_AUDIT_KEY` is set). Editing,
 ## Limits
 
 - **Streaming isn't proxied yet.** Placeholders can split across chunks, so the gateway asks for `stream: false`.
-- **Name detection uses labels and honorifics.** For free-form text, add an NER model (spaCy or a fine-tuned IndicBERT) in `detect.py`. The rest of the pipeline stays the same.
+- **Name detection uses labels and honorifics.** On realistic documents that catches about a quarter of names. For free-form text, add an NER model (spaCy or a fine-tuned IndicBERT) in `detect.py`. The rest of the pipeline stays the same.
 - **Images and PDFs are refused by default**, because they can't be text-scanned. Put OCR in front, or set `allow_binary` if your policy allows it.
 - **The vault is in memory.** For several replicas, back it with Redis using the same AES-GCM sealing, and share `PRIVGATE_VAULT_KEY`.

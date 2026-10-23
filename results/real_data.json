@@ -1,0 +1,208 @@
+{
+  "dataset": "gretelai/synthetic_pii_finance_multilingual, English test split (held out; patterns were extended using a sample of the train split)",
+  "documents": 2891,
+  "note": "masked = the span overlaps something the gateway tokenises, redacts or blocks; the last-but-one figure is a lower bound on precision because the labels can miss PII",
+  "before": {
+    "targeted_spans_masked": 0.121,
+    "detections_on_a_labelled_span": 0.462,
+    "documents_that_would_be_refused": 54
+  },
+  "after": {
+    "targeted_spans_masked": 0.375,
+    "detections_on_a_labelled_span": 0.653,
+    "documents_that_would_be_refused": 81
+  },
+  "by_label": {
+    "name": {
+      "target_type": "PERSON",
+      "gold": 3489,
+      "masked_before": 0.038,
+      "masked_after": 0.245
+    },
+    "company": {
+      "target_type": null,
+      "gold": 3476,
+      "masked_before": 0.001,
+      "masked_after": 0.052
+    },
+    "street_address": {
+      "target_type": null,
+      "gold": 2194,
+      "masked_before": 0.0,
+      "masked_after": 0.0
+    },
+    "date": {
+      "target_type": null,
+      "gold": 923,
+      "masked_before": 0.004,
+      "masked_after": 0.007
+    },
+    "phone_number": {
+      "target_type": "PHONE",
+      "gold": 480,
+      "masked_before": 0.015,
+      "masked_after": 0.79
+    },
+    "email": {
+      "target_type": "EMAIL",
+      "gold": 330,
+      "masked_before": 0.945,
+      "masked_after": 0.945
+    },
+    "time": {
+      "target_type": null,
+      "gold": 211,
+      "masked_before": 0.0,
+      "masked_after": 0.0
+    },
+    "first_name": {
+      "target_type": "PERSON",
+      "gold": 159,
+      "masked_before": 0.006,
+      "masked_after": 0.075
+    },
+    "date_of_birth": {
+      "target_type": "DOB",
+      "gold": 126,
+      "masked_before": 0.54,
+      "masked_after": 0.825
+    },
+    "employee_id": {
+      "target_type": null,
+      "gold": 114,
+      "masked_before": 0.009,
+      "masked_after": 0.009
+    },
+    "swift_bic_code": {
+      "target_type": null,
+      "gold": 112,
+      "masked_before": 0.0,
+      "masked_after": 0.0
+    },
+    "customer_id": {
+      "target_type": null,
+      "gold": 94,
+      "masked_before": 0.0,
+      "masked_after": 0.021
+    },
+    "bban": {
+      "target_type": "ACCOUNT",
+      "gold": 93,
+      "masked_before": 0.129,
+      "masked_after": 0.387
+    },
+    "ssn": {
+      "target_type": null,
+      "gold": 85,
+      "masked_before": 0.0,
+      "masked_after": 0.0
+    },
+    "credit_card_number": {
+      "target_type": "CARD",
+      "gold": 83,
+      "masked_before": 0.518,
+      "masked_after": 0.783
+    },
+    "last_name": {
+      "target_type": "PERSON",
+      "gold": 82,
+      "masked_before": 0.0,
+      "masked_after": 0.085
+    },
+    "bank_routing_number": {
+      "target_type": null,
+      "gold": 81,
+      "masked_before": 0.049,
+      "masked_after": 0.049
+    },
+    "account_pin": {
+      "target_type": "OTP",
+      "gold": 80,
+      "masked_before": 0.412,
+      "masked_after": 0.412
+    },
+    "credit_card_security_code": {
+      "target_type": "CVV",
+      "gold": 76,
+      "masked_before": 0.0,
+      "masked_after": 0.382
+    },
+    "passport_number": {
+      "target_type": "PASSPORT",
+      "gold": 76,
+      "masked_before": 0.013,
+      "masked_after": 0.539
+    },
+    "iban": {
+      "target_type": "ACCOUNT",
+      "gold": 69,
+      "masked_before": 0.087,
+      "masked_after": 0.986
+    },
+    "driver_license_number": {
+      "target_type": null,
+      "gold": 68,
+      "masked_before": 0.0,
+      "masked_after": 0.0
+    },
+    "ipv4": {
+      "target_type": null,
+      "gold": 62,
+      "masked_before": 0.0,
+      "masked_after": 0.0
+    },
+    "ipv6": {
+      "target_type": null,
+      "gold": 61,
+      "masked_before": 0.0,
+      "masked_after": 0.0
+    },
+    "local_latlng": {
+      "target_type": null,
+      "gold": 58,
+      "masked_before": 0.0,
+      "masked_after": 0.0
+    },
+    "api_key": {
+      "target_type": "SECRET",
+      "gold": 54,
+      "masked_before": 0.167,
+      "masked_after": 0.167
+    },
+    "password": {
+      "target_type": "SECRET",
+      "gold": 47,
+      "masked_before": 0.255,
+      "masked_after": 0.277
+    },
+    "date_time": {
+      "target_type": null,
+      "gold": 38,
+      "masked_before": 0.0,
+      "masked_after": 0.0
+    },
+    "user_name": {
+      "target_type": null,
+      "gold": 32,
+      "masked_before": 0.125,
+      "masked_after": 0.125
+    }
+  },
+  "not_targeted_labels": [
+    "ssn",
+    "driver_license_number",
+    "street_address",
+    "company",
+    "customer_id",
+    "employee_id",
+    "swift_bic_code",
+    "bank_routing_number",
+    "ipv4",
+    "ipv6",
+    "user_name",
+    "date",
+    "date_time",
+    "time",
+    "local_latlng"
+  ]
+}
