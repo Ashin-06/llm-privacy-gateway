@@ -3,6 +3,9 @@ from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import text
+
+from privgate import db
 
 from privgate.audit import Audit
 from privgate.bench import run
@@ -48,21 +51,27 @@ def test_blocked_data_refuses_request():
 def test_vault_encrypts_and_scopes_by_conversation():
     v = Vault()
     ph = v.tokenize("a", "PAN", "ABCPS1234K")
-    assert b"ABCPS1234K" not in v.convs["a"].sealed[ph]
+    with v.db.connect() as c:
+        stored = " ".join(str(x) for row in c.execute(text("SELECT * FROM vault_entries")) for x in row)
+    assert "abcps1234k" not in stored.lower()
     assert v.reveal("a", ph) == "ABCPS1234K" and v.reveal("b", ph) is None
 
 
 def test_audit_tamper_detection(tmp_path):
-    a = Audit(tmp_path / "a.jsonl", key=b"k")
+    store = db.connect(f"sqlite:///{tmp_path / 'a.db'}")
+    a = Audit(store, key=b"k" * 32)
     for i in range(3):
         a.write(user="u", n=i)
     assert a.verify()[0]
-    lines = (tmp_path / "a.jsonl").read_text().splitlines()
-    e = json.loads(lines[1])
-    e["user"] = "someone-else"
-    lines[1] = json.dumps(e)
-    (tmp_path / "a.jsonl").write_text("\n".join(lines) + "\n")
-    assert not Audit(tmp_path / "a.jsonl", key=b"k").verify()[0]
+    with store.begin() as c:
+        e = json.loads(c.execute(text("SELECT entry FROM audit_log WHERE seq = 1")).scalar())
+        c.execute(text("UPDATE audit_log SET entry = :e WHERE seq = 1"), {"e": json.dumps({**e, "user": "someone-else"})})
+    assert not Audit(store, key=b"k" * 32).verify()[0]
+    with store.begin() as c:
+        c.execute(text("UPDATE audit_log SET entry = :e WHERE seq = 1"), {"e": json.dumps(e)})
+        c.execute(text("DELETE FROM audit_log WHERE seq = 1"))
+    assert not Audit(store, key=b"k" * 32).verify()[0]  # a gap in the chain
+    assert not Audit(store, key=b"x" * 32).verify()[0]  # the wrong key
 
 
 def test_benchmark_beats_naive_regex():
@@ -85,7 +94,6 @@ class _FakeMessages:
 
 
 def test_proxy_end_to_end(tmp_path, monkeypatch):
-    monkeypatch.setenv("PRIVGATE_AUDIT_LOG", str(tmp_path / "audit.jsonl"))
     import importlib
 
     import privgate.gateway as gw
@@ -113,7 +121,6 @@ def test_proxy_end_to_end(tmp_path, monkeypatch):
 def test_gateway_keys_decide_identity(tmp_path, monkeypatch):
     keys = {"k-support": {"user": "meera", "role": "support"}, "k-fraud": {"user": "ravi", "role": "fraud_analyst"}}
     monkeypatch.setenv("PRIVGATE_API_KEYS", json.dumps(keys))
-    monkeypatch.setenv("PRIVGATE_AUDIT_LOG", str(tmp_path / "audit.jsonl"))
     import importlib
 
     import privgate.gateway as gw
@@ -134,6 +141,6 @@ def test_gateway_keys_decide_identity(tmp_path, monkeypatch):
     out = c.post("/v1/restore", json={"text": "[[PERSON_1]]", "conversation": cid}, headers={"x-api-key": "k-fraud"}).json()
     assert out["text"] == "[[PERSON_1]]" and out["stats"]["not_conversation_owner"] == 1
     assert c.get("/v1/audit").status_code == 401
-    assert c.get("/healthz").json()["auth"] == "gateway keys"
+    assert c.get("/readyz").json()["auth"] == "api keys"
     monkeypatch.delenv("PRIVGATE_API_KEYS")
     importlib.reload(gw)

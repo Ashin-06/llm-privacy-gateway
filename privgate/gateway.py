@@ -5,62 +5,54 @@ block in the system prompt, messages and tool results is sanitised before the re
 goes upstream; placeholders in the reply are restored for the caller's role; anything
 sensitive the model produced on its own is caught; and the whole exchange is audited.
 
-    uvicorn privgate.gateway:app --port 8010
+    python -m privgate serve
 
-Headers:  x-privgate-user, x-privgate-role, x-privgate-conversation (reuse to keep
-          placeholders stable across turns; a new id is returned when absent)
+Headers:  x-api-key (or Authorization: Bearer), x-privgate-conversation (reuse to keep
+          placeholders stable across turns; a new id is returned when absent).
+          In local demo mode (no keys) x-privgate-user / x-privgate-role are trusted instead.
 """
 from __future__ import annotations
 
 import copy
-import hashlib
-import json
+import logging
 import os
 import time
 import uuid
 from pathlib import Path
 
-from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field
 
+from . import db, ops
 from .audit import Audit
 from .engine import Blocked, Engine
+from .vault import Vault
 
 ROOT = Path(__file__).resolve().parent.parent
+log = logging.getLogger("privgate.gateway")
+
+settings = ops.load_settings()
+ops.setup_logging(settings.log_level)
+store = db.connect(settings.database_url)
+engine = Engine(os.environ.get("PRIVGATE_POLICY", ROOT / "policy.toml"),
+                vault=Vault(key=settings.secret["VAULT_KEY"], engine=store, previous_keys=settings.previous["VAULT_KEY"]))
+audit = Audit(store, key=settings.secret["AUDIT_KEY"], previous_keys=settings.previous["AUDIT_KEY"])
+if settings.production and not os.environ.get("ANTHROPIC_API_KEY") and not os.environ.get("PRIVGATE_UPSTREAM_URL"):
+    raise ops.ConfigError("production needs ANTHROPIC_API_KEY (or PRIVGATE_UPSTREAM_URL for an internal proxy)")
 
 
-def _load_keys() -> dict[str, dict]:
-    """Gateway keys -> identity. PRIVGATE_KEYS_FILE (JSON file) or PRIVGATE_API_KEYS (JSON
-    string): {"<key>": {"user": "meera", "role": "support"}}. Keys are held only as SHA-256."""
-    raw = None
-    if os.environ.get("PRIVGATE_KEYS_FILE"):
-        raw = Path(os.environ["PRIVGATE_KEYS_FILE"]).read_text(encoding="utf-8")
-    elif os.environ.get("PRIVGATE_API_KEYS"):
-        raw = os.environ["PRIVGATE_API_KEYS"]
-    if not raw:
-        return {}
-    return {hashlib.sha256(k.encode()).hexdigest(): {"user": str(v["user"]), "role": str(v["role"])}
-            for k, v in json.loads(raw).items()}
-
-
-KEYS = _load_keys()
-
-
-def identify(request: Request) -> tuple[str, str]:
+def identify(ident: dict, request: Request) -> tuple[str, str]:
     """Who is calling. With keys configured the key decides user and role, and the
     x-privgate-user / x-privgate-role headers are ignored. Without keys (local demo
     mode) the headers are trusted."""
-    if KEYS:
-        token = request.headers.get("x-api-key") or request.headers.get("authorization", "").removeprefix("Bearer ").strip()
-        ident = KEYS.get(hashlib.sha256(token.encode()).hexdigest()) if token else None
-        if ident is None:
-            raise HTTPException(401, "missing or unknown gateway key")
+    if not settings.demo:
         return ident["user"], ident["role"]
     return request.headers.get("x-privgate-user", "anonymous"), request.headers.get("x-privgate-role", "developer")
-engine = Engine(os.environ.get("PRIVGATE_POLICY", ROOT / "policy.toml"))
-audit = Audit(os.environ.get("PRIVGATE_AUDIT_LOG", ROOT / "data" / "audit.jsonl"))
-app = FastAPI(title="LLM Privacy Gateway", version="1.0")
+
+
+app = FastAPI(title="LLM Privacy Gateway", version="1.0.0")
+ops.install(app, settings, {"database": lambda: store.connect().close(), "policy": lambda: bool(engine.policy)})
 _upstream = None
 
 
@@ -120,10 +112,16 @@ def _walk_json(obj, fn):
 
 
 @app.post("/v1/messages")
-async def messages(request: Request, x_privgate_conversation: str | None = Header(None)):
+async def messages(request: Request, x_privgate_conversation: str | None = Header(None, max_length=64),
+                   ident: dict = Depends(ops.require("use"))):
     t0 = time.time()
-    x_privgate_user, x_privgate_role = identify(request)
-    body = await request.json()
+    x_privgate_user, x_privgate_role = identify(ident, request)
+    try:
+        body = await request.json()
+    except ValueError:
+        raise HTTPException(400, "body must be JSON") from None
+    if not isinstance(body, dict):
+        raise HTTPException(400, "body must be a JSON object")
     cid = x_privgate_conversation or uuid.uuid4().hex
     if not engine.vault.claim(cid, x_privgate_user):
         raise HTTPException(403, "this conversation belongs to another user")
@@ -160,10 +158,14 @@ async def messages(request: Request, x_privgate_conversation: str | None = Heade
         resp = client.beta.messages.create(betas=clean["betas"], **params) if clean.get("betas") else client.messages.create(**params)
     except anthropic.APIStatusError as e:
         audit.write(user=x_privgate_user, role=x_privgate_role, conversation=cid, model=model, status="upstream_error", code=e.status_code)
+        if e.status_code in (401, 403):  # the gateway's own upstream credentials: the caller can't fix that
+            log.error("upstream rejected the gateway's credentials", extra={"fields": {"code": e.status_code}})
+            raise HTTPException(502, "upstream unavailable") from None
         return JSONResponse(status_code=e.status_code, content={"type": "error", "error": {"type": "upstream_error", "message": e.message}})
-    except (anthropic.APIConnectionError, TypeError) as e:  # TypeError: no credentials configured
+    except (anthropic.APIConnectionError, TypeError):  # TypeError: no credentials configured
         audit.write(user=x_privgate_user, role=x_privgate_role, conversation=cid, model=model, status="upstream_unavailable")
-        raise HTTPException(502, f"upstream unavailable: {e}") from e
+        log.error("upstream unavailable", exc_info=True)
+        raise HTTPException(502, "upstream unavailable") from None
 
     out = resp.model_dump() if hasattr(resp, "model_dump") else dict(resp)
     restored, leaks = {}, {}
@@ -190,13 +192,13 @@ async def messages(request: Request, x_privgate_conversation: str | None = Heade
 
 class TextIn(BaseModel):
     text: str = Field(..., max_length=400_000)
-    conversation: str | None = None
-    role: str | None = None
+    conversation: str | None = Field(None, max_length=64)
+    role: str | None = Field(None, max_length=32)
 
 
 @app.post("/v1/sanitize")
-def sanitize_preview(request: Request, body: TextIn):
-    user, _ = identify(request)
+def sanitize_preview(request: Request, body: TextIn, ident: dict = Depends(ops.require("use"))):
+    user, _ = identify(ident, request)
     cid = body.conversation or uuid.uuid4().hex
     if not engine.vault.claim(cid, user):
         raise HTTPException(403, "this conversation belongs to another user")
@@ -208,27 +210,20 @@ def sanitize_preview(request: Request, body: TextIn):
 
 
 @app.post("/v1/restore")
-def restore(request: Request, body: TextIn):
+def restore(request: Request, body: TextIn, ident: dict = Depends(ops.require("use"))):
     if not body.conversation:
         raise HTTPException(400, "conversation is required")
-    user, role = identify(request)
-    if not KEYS and body.role:
+    user, role = identify(ident, request)
+    if settings.demo and body.role:
         role = body.role  # demo mode only: the playground picks a role to show the difference
     text, stats = engine.restore(body.text, body.conversation, role, user)
     return {"text": text, "stats": stats}
 
 
 @app.get("/v1/audit")
-def audit_log(request: Request, limit: int = 100):
-    identify(request)
+def audit_log(limit: int = 100, ident: dict = Depends(ops.require("audit"))):
     ok, msg = audit.verify()
-    return {"verified": ok, "message": msg, "entries": audit.entries[-max(1, min(limit, 1000)):]}
-
-
-@app.get("/healthz")
-def health():
-    return {"ok": True, "auth": "gateway keys" if KEYS else "demo mode: x-privgate-user/role headers are trusted",
-            "approved_models": sorted({m for d in engine.policy.get("destinations", {}).values() for m in d.get("models", [])})}
+    return {"verified": ok, "message": msg, "entries": audit.tail(max(1, min(limit, 1000)))}
 
 
 @app.get("/")

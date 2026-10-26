@@ -3,11 +3,13 @@
     python -m privgate scan  ticket.txt            # what would be detected
     python -m privgate mask  ticket.txt            # sanitised text
     python -m privgate bench                       # detection benchmark vs naive regex
-    python -m privgate serve --port 8010           # gateway + playground
+    python -m privgate serve                       # gateway + playground (settings: PRIVGATE_* env)
+    python -m privgate migrate                     # apply database migrations and exit
 """
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 import uuid
 from pathlib import Path
@@ -31,8 +33,9 @@ def main(argv=None):
     r.add_argument("--gretel", required=True, help="English_test parquet of gretelai/synthetic_pii_finance_multilingual")
     r.add_argument("--out", default="results/real_data.json")
     s = sub.add_parser("serve")
-    s.add_argument("--port", type=int, default=8010)
-    s.add_argument("--host", default="127.0.0.1")
+    s.add_argument("--port", type=int, help="default PRIVGATE_PORT or 8010")
+    s.add_argument("--host", help="default PRIVGATE_HOST or 127.0.0.1; any other address needs API keys")
+    sub.add_parser("migrate", help="apply database migrations to PRIVGATE_DATABASE_URL")
     a = ap.parse_args(argv)
 
     if a.cmd in ("scan", "mask"):
@@ -65,10 +68,25 @@ def main(argv=None):
         for t in res["gateway"]:
             g, n = res["gateway"][t], res["naive_regex"].get(t, {"precision": 0, "recall": 0, "f1": 0})
             print(f"{t:10s} {g['precision']:.3f} / {g['recall']:.3f} / {g['f1']:.3f}   {n['precision']:.3f} / {n['recall']:.3f} / {n['f1']:.3f}")
+    elif a.cmd == "migrate":
+        from . import db, ops
+
+        applied = db.migrate(db.engine(ops.load_settings().database_url))
+        print(*(applied or ["up to date"]), sep="\n")
     else:
         import uvicorn
 
-        uvicorn.run("privgate.gateway:app", host=a.host, port=a.port)
+        from . import ops
+
+        for name, val in (("HOST", a.host), ("PORT", a.port)):
+            if val is not None:
+                os.environ[f"PRIVGATE_{name}"] = str(val)
+        try:
+            settings = ops.load_settings()  # fail here, before uvicorn, with a readable message
+        except ops.ConfigError as e:
+            sys.exit(f"configuration error: {e}")
+        ops.setup_logging(settings.log_level)
+        uvicorn.run("privgate.gateway:app", host=settings.host, port=settings.port, log_config=None, access_log=False)
 
 
 if __name__ == "__main__":
