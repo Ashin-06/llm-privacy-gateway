@@ -271,7 +271,7 @@ def setup_logging(level: str = "INFO") -> None:
     root.setLevel(level)
     for name in ("uvicorn", "uvicorn.error", "uvicorn.access"):
         logging.getLogger(name).handlers[:] = []
-        logging.getLogger(name).propagate = True
+        logging.getLogger(name).propagate = name != "uvicorn.access"  # the Guard logs each request
 
 
 # --- the outermost layer ---------------------------------------------------------------
