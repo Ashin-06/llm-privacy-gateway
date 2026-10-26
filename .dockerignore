@@ -1,0 +1,6 @@
+*
+!privgate
+!web
+!policy.toml
+!requirements.lock
+**/__pycache__
