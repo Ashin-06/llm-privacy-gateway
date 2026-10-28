@@ -1,192 +1,111 @@
 # LLM Privacy Gateway
 
-Bank staff paste customer tickets, statements and call notes into AI assistants every day. This gateway sits between them and the AI provider. Before a prompt leaves the bank, it masks or blocks every Indian-banking identifier in it. It puts the real values back in the reply only for roles allowed to see them, catches identifiers the model makes up on its own, and writes a tamper-evident audit trail of every exchange.
+A proxy that sits between bank staff and an external LLM. Before a prompt leaves the bank it masks or blocks customer identifiers such as Aadhaar, PAN, card and account numbers. When the reply comes back it restores the real values only for roles that are allowed to see them, and every exchange is written to a tamper-evident audit log.
 
-It speaks the Anthropic Messages API, so existing code only changes its `base_url`.
+The gateway speaks the Anthropic Messages API, so existing client code only needs a new `base_url`.
 
 ```
-employee / app ──► gateway ──(sanitised)──► Claude
+employee / app ──► gateway ──(masked prompt)──► LLM provider
                      │  ▲
-                     │  └── placeholders restored per role, leaks in the reply masked
-                     └── encrypted vault · policy · hash-chained audit
+                     │  └── values restored per role, leaks in the reply masked
+                     └── encrypted vault · policy · audit log
 ```
 
-## Detection that validates, not just matches
+## Features
 
-| Type | How it is confirmed |
-|---|---|
-| Aadhaar | 12 digits, first 2–9, **Verhoeff check digit**. Labelled Aadhaar with a bad check digit is still caught, at lower confidence. |
-| Card | 13–19 digits, **Luhn** plus a known **network prefix** (Visa, Mastercard, RuPay, Amex, Diners); a number whose nearest label is "card" is masked even if the checksum fails |
-| PAN | `AAAAA9999A` with a valid **holder-type** letter (P, C, H, F, A, T, B, L, J, G) |
-| GSTIN | state code + PAN + **mod-36 check character** |
-| Bank account | 9–18 digits only when the *closest* label before it is an account label (a/c, account no, beneficiary...), not UTR / order / ticket / phone. **IBANs** by the ISO 7064 **mod-97** check (or an IBAN label); labelled BBANs |
-| CVV, OTP, PIN | value after the label (`otp is 482913`, `cvv: 123`, `security code: 624`) |
-| UPI ID | `name@handle` with a real PSP handle (okaxis, ybl, paytm...), not email addresses |
-| Phone, email, DOB, passport, voter ID, IFSC | format plus context; international phones (`(123) 456-7890`, `+44 ...`) when the nearest label is a phone label; any passport number after a passport label |
-| Names | honorifics (Mr., Smt., Dr.) and labels (customer name, beneficiary, applicant, nominee, policyholder, Dear ...), with initials and non-English letters |
-| Secrets | AWS keys, private-key blocks, GitHub tokens, JWTs, API keys, `password=` |
-| Your own IDs | regexes in `policy.toml` (`CIF12345678`, loan numbers...) |
+- Detects Indian banking identifiers and confirms them with their check digits (Verhoeff for Aadhaar, Luhn for cards, mod-36 for GSTIN), so order numbers and UTRs are not mistaken for them.
+- Per-type policy: replace with a reversible placeholder, redact, block the request, or allow.
+- Placeholders such as `[[PAN_1]]` stay the same within a conversation, so the model can still reason about them.
+- Original values are kept in an AES-256-GCM vault in SQLite or Postgres, tied to the conversation and the user who started it.
+- Identifiers that the model invents in its reply are masked before the employee sees them.
+- Per-client API keys with roles, rate limits, JSON logs, Prometheus metrics and an HMAC-chained audit log.
+- A browser playground that shows each step on a sample ticket without calling a model.
 
-Benchmark (`python -m privgate bench`, 600 generated support tickets, chat logs and call notes, including look-alike negatives: order ids, UTRs, tracking numbers, PO numbers):
-
-| Type | Gateway precision / recall | Naive regex precision / recall |
-|---|---|---|
-| Aadhaar | 0.984 / 1.000 | 0.195 / 1.000 |
-| Card | 1.000 / 1.000 | 0.445 / 1.000 |
-| Bank account | 1.000 / 0.988 | 0.172 / 1.000 |
-| PAN, GSTIN, IFSC, UPI, phone, email, OTP, CVV, DOB, names | 1.000 / 1.000 | mostly not detected |
-
-The naive detector treats every 12-digit number as Aadhaar and every 16-digit number as a card. That is why typical DLP rules swamp teams with false positives, or get switched off. Checksums and label proximity fix it. The corpus comes from templates, so expect lower recall on free-form text, especially names; see Limits.
-
-### On realistic bank documents
-
-The benchmark above is template text. To test realistic documents I used [Gretel's financial PII dataset](https://huggingface.co/datasets/gretelai/synthetic_pii_finance_multilingual) (Apache-2.0): loan applications, SWIFT messages, statements and claims, with every identifier labelled. These are LLM-written documents about invented people, the closest legal stand-in, since real customer identifiers cannot be published. Most of the documents are US and European, so identifiers outside the Indian formats above show up here. Command: `python -m privgate realdata`; results in `results/real_data.json`.
-
-The first run masked only **12%** of the identifiers the gateway targets. Patterns were then added using a sample of Gretel's **train** split; the numbers below are on its **held-out test split** (2,891 English documents).
-
-| Identifier | Labelled | Masked before → after |
-|---|---|---|
-| IBAN | 69 | 9% → **99%** |
-| Email | 330 | 95% → 95% |
-| Date of birth | 126 | 54% → 83% |
-| Phone | 480 | 2% → **79%** |
-| Card number | 83 | 52% → 78% |
-| Passport | 76 | 1% → 54% |
-| Card security code | 76 | 0% → 38% |
-| Bank PIN | 80 | 41% → 41% |
-| BBAN | 93 | 13% → 39% |
-| Names | 3,730 | 4% → **23%** |
-| API keys, passwords | 101 | 21% → 22% |
-| **All targeted identifiers** | | **12% → 37.5%** |
-
-Also on this data:
-- **About 65% of what the gateway masks sits on a labelled identifier.** The labels miss some PII, so this is a lower bound on precision.
-- **The Indian benchmark above is unchanged** after these additions.
-
-What this says:
-- **Checksummed and labelled identifiers are now handled well.**
-- **Names are the gap.** Three quarters of the names in ordinary prose have no honorific or label for a pattern to anchor on. Before relying on the gateway for free text, add a named-entity model (see Limits); it is the biggest single improvement available.
-- **US SSNs, driver's licences, street addresses, routing numbers and company names are not targeted** and pass through. Add them to `custom_patterns` or `policy.toml` if your traffic carries them.
-
-## What happens to each value (`policy.toml`)
-
-| Action | Effect | Default for |
-|---|---|---|
-| `tokenize` | reversible placeholder, stable within a conversation: `[[PAN_1]]`, `[[CARD_1:1111]]` (last 4 as a hint) | Aadhaar, card, PAN, account, phone, email, UPI, DOB, names, passport, voter ID, custom IDs |
-| `block` | whole request refused with HTTP 422 | CVV, OTP/PIN, secrets |
-| `redact` | irreversible `[REDACTED:TYPE]` | — |
-| `allow` | passes through | IFSC, GSTIN (public) |
-
-Originals are kept per conversation in an **AES-256-GCM vault** in the database (SQLite or Postgres). The conversation id is bound as authenticated data, so a placeholder from one conversation can't be decrypted in another. The database holds only ciphertext and a keyed hash for spotting repeats, never the value. Mappings expire after an hour. **Roles** decide what comes back:
-- `support` sees names and contact details.
-- `fraud_analyst` also sees PAN, card and Aadhaar.
-- `developer` sees nothing.
-
-The policy also lists **approved models**, a request size limit, and whether images or documents (which can't be text-scanned) are refused.
-
-## The model's reply is checked too
-
-If the model produces an identifier that didn't come from a placeholder (it guessed, completed or made one up), the gateway masks it before the reply reaches the employee and records it in the audit as `leaks_in_reply`.
-
-## Use it
+## Quick start
 
 ```bash
-pip install -r requirements.txt          # or: pip install -r requirements-dev.lock && pip install -e .
-python -m pytest -q                      # 38 tests, including full proxy round-trips with a stub model
-python -m privgate realdata --gretel English_test-00000-of-00001.parquet   # needs pandas + pyarrow
-python -m privgate serve                 # gateway + playground on http://127.0.0.1:8010 (demo mode)
-docker build -t llm-privacy-gateway .    # production image; see docs/runbook.md
-python -m privgate scan ticket.txt       # what would be detected
-python -m privgate mask ticket.txt       # sanitised text
-python -m privgate bench
+pip install -r requirements.txt
+python -m pytest -q                     # 38 tests
+python -m privgate serve                # gateway and playground on http://127.0.0.1:8010
+python -m privgate scan ticket.txt      # show what would be detected
+python -m privgate mask ticket.txt      # print the masked text
 ```
 
-Point the Anthropic SDK at the gateway:
+Without API keys the gateway runs in demo mode and only listens on localhost. For production settings, see [docs/runbook.md](docs/runbook.md).
+
+## Using it from code
 
 ```python
 import anthropic
 
 client = anthropic.Anthropic(
     base_url="http://127.0.0.1:8010",
-    api_key="<gateway key issued to this employee or app>",   # not an Anthropic key
+    api_key="<gateway key for this employee or app>",
 )
 reply = client.messages.create(
-    model="claude-opus-5-5",
+    model="<an approved model id from policy.toml>",
     max_tokens=2000,
     messages=[{"role": "user", "content": ticket_text}],
 )
 ```
 
-To keep placeholders stable across turns, reuse the `x-privgate-conversation` value returned in the first response header.
+Send back the `x-privgate-conversation` header from the first response to keep placeholders stable across turns. The gateway calls the provider with its own credentials, so employees never hold the provider key.
 
-The gateway calls Anthropic with its own credentials (`ANTHROPIC_API_KEY` on the gateway host), so employees never hold the key.
+## What gets detected
 
-### Who is calling
-
-Issue each employee or app a **gateway key** (`python -m privgate.ops keygen`) and list its hash in `PRIVGATE_KEYS_FILE` (or the `PRIVGATE_API_KEYS` variable):
-
-```json
-{"sha256:5b1e...": {"user": "agent.meera", "role": "support"},
- "sha256:0c4d...": {"user": "ravi.k", "role": "fraud_analyst"},
- "sha256:9e27...": {"user": "audit.team", "role": "auditor"}}
-```
-
-- The key decides the user and role. `x-privgate-user` / `x-privgate-role` headers are ignored, so nobody can promote themselves to a role that sees more.
-- `support`, `fraud_analyst` and `developer` may use the gateway; `auditor` may only read `/v1/audit`; `monitor` may only scrape `/metrics`; `admin` may do all three.
-- A conversation belongs to the user who started it. Another user can't continue it or restore its values, even with a broader role.
-- The gateway only ever holds SHA-256 hashes of keys. In production it refuses plain keys in its configuration.
-- **With no keys configured the gateway runs in demo mode:** the identity headers are trusted, which is fine for the local playground and nothing else. It then refuses to listen on anything but loopback. `GET /readyz` shows which mode is active.
-
-All settings, and how to rotate keys and back up the database, are in [docs/runbook.md](docs/runbook.md). The ones that matter most:
-
-| Setting | Purpose |
+| Type | How it is confirmed |
 |---|---|
-| `PRIVGATE_ENV=production` | refuse to start without hashed API keys, the keys below, a database URL and upstream credentials |
-| `PRIVGATE_KEYS_FILE` / `PRIVGATE_API_KEYS` | gateway keys and the identity each one carries (see above) |
-| `PRIVGATE_VAULT_KEY` | base64 AES-256 key that seals the vault (development: random per process) |
-| `PRIVGATE_AUDIT_KEY` | HMAC key for the audit chain |
-| `PRIVGATE_DATABASE_URL` | where the vault and audit trail live: `sqlite:///...` or `postgresql://...` (development: in memory) |
-| `PRIVGATE_POLICY` | policy file |
-| `PRIVGATE_UPSTREAM_URL` | alternative upstream (an internal proxy, for example) |
+| Aadhaar | 12 digits with a valid Verhoeff check digit |
+| Card | 13–19 digits, Luhn check and a known network prefix |
+| PAN | `AAAAA9999A` with a valid holder-type letter |
+| GSTIN | state code, PAN and mod-36 check character |
+| Bank account | 9–18 digits when the nearest label is an account label; IBANs by their mod-97 check |
+| CVV, OTP, PIN | the value after its label |
+| UPI ID | `name@handle` with a known UPI handle |
+| Phone, email, DOB, passport, voter ID, IFSC | format plus nearby label |
+| Names | after titles (Mr., Smt., Dr.) or labels such as "customer name" |
+| Secrets | AWS keys, private keys, GitHub tokens, JWTs, passwords |
+| Your own IDs | regular expressions in `policy.toml` |
 
-The **playground** at `/` shows each step on a sample ticket:
-1. The prompt as the employee wrote it.
-2. What was detected, colour-coded by action.
-3. Exactly what the AI provider receives.
-4. A model reply restored for each role.
+## Roles
 
-It also shows the live audit trail with chain verification. Nothing in the playground calls a model.
+Each employee or app gets its own gateway key (`python -m privgate.ops keygen`). The key decides the user and role; identity headers in the request are ignored.
 
-## Audit
+| Role | Can see |
+|---|---|
+| `support` | names and contact details |
+| `fraud_analyst` | also PAN, card and Aadhaar |
+| `developer` | nothing restored |
+| `auditor` | the audit log only |
 
-Every request records:
-- user, role, conversation, model
-- counts per type and action (`PAN:tokenize×1`), never the values
-- restorations, leaks in the reply, stop reason, latency
-- blocked and rejected requests
+A conversation belongs to the user who started it, and nobody else can continue it or restore its values.
 
-Entries are stored in the database and chained with an HMAC (`PRIVGATE_AUDIT_KEY`). Editing, deleting or reordering one breaks `/v1/audit` verification. Removing the newest entries is only caught if you keep a copy of the chain head elsewhere. Reading the trail needs the `auditor` or `admin` role.
+## Results
 
-## Limits
+On 600 generated tickets, the gateway's precision for Aadhaar, card and account numbers is 0.98–1.00, against 0.17–0.45 for plain regular expressions.
 
-- **Streaming isn't proxied yet.** Placeholders can split across chunks, so the gateway asks for `stream: false`.
-- **Name detection uses labels and honorifics.** On realistic documents that catches about a quarter of names. For free-form text, add an NER model (spaCy or a fine-tuned IndicBERT) in `detect.py`. The rest of the pipeline stays the same.
-- **Images and PDFs are refused by default**, because they can't be text-scanned. Put OCR in front, or set `allow_binary` if your policy allows it.
-- **Rate limits are per process.** With several replicas, put a shared limiter at the ingress.
+On 2,891 held-out documents from Gretel's financial PII dataset, it masks 37.5% of the identifiers it targets, up from 12% before tuning on the train split. It handles IBANs (99%) and phone numbers (79%) well, but finds only 23% of names. Full tables are in [docs/evaluation.md](docs/evaluation.md).
 
-## Production readiness
+## Configuration
 
-**In place** (see [docs/runbook.md](docs/runbook.md) and [docs/threat-model.md](docs/threat-model.md)):
-- Pinned dependencies (`requirements.lock`), `pyproject.toml`, a container image that runs as a non-root user with a health check, and CI (ruff, bandit, pip-audit, tests with coverage).
-- Production mode that refuses to start without hashed per-client API keys, vault and audit keys, a database and upstream credentials. No secret has a default, and the gateway won't listen publicly without keys.
-- Roles on keys, per-client rate limits, a body size cap, security headers, CORS only for listed origins, and errors that don't echo input or internals.
-- Vault and audit trail in SQLite or Postgres, with numbered migrations and key rotation.
-- JSON logs with request IDs, `/healthz`, `/readyz` and Prometheus metrics.
+| Variable | Purpose |
+|---|---|
+| `PRIVGATE_ENV=production` | refuse to start without keys, a database and provider credentials |
+| `PRIVGATE_KEYS_FILE` | hashed gateway keys and the user and role for each |
+| `PRIVGATE_VAULT_KEY` | AES-256 key for the vault |
+| `PRIVGATE_AUDIT_KEY` | HMAC key for the audit log |
+| `PRIVGATE_DATABASE_URL` | `sqlite:///...` or `postgresql://...` |
+| `PRIVGATE_POLICY` | path to the policy file |
+| `ANTHROPIC_API_KEY` or `PRIVGATE_UPSTREAM_URL` | provider credentials, or an internal proxy |
 
-**Still needed before it handles real customer data**, none of which code can supply:
-- An independent security review and penetration test. Nobody outside this project has reviewed it.
-- Validation on the bank's own tickets and prompts. The detection numbers above come from generated and LLM-written documents; on realistic text most names are missed.
-- RBI and DPDP Act 2023 sign-off on what may be sent to an external model at all, and a data processing agreement with the provider.
-- Vault and audit keys in an HSM or a KMS rather than environment variables.
-- Integration with the bank's identity provider (SSO) and ticketing tools, instead of static API keys handed out per client.
-- TLS and a shared rate limiter at the ingress; an on-call team with SLOs and alerting on the metrics above.
+The full list, key rotation and backups are covered in [docs/runbook.md](docs/runbook.md). A container image is built with `docker build -t llm-privacy-gateway .`.
+
+## Limitations
+
+- Streaming responses are not proxied yet.
+- Names without a title or label are usually missed. Adding a named-entity model in `privgate/detect.py` is the biggest improvement available.
+- Images and PDFs are refused by default because they cannot be scanned as text.
+- Rate limits are per process; use a shared limiter when running several replicas.
+- The code has not had an independent security review. Before handling real customer data it also needs keys in an HSM or KMS, single sign-on instead of static keys, and approval under the bank's data protection rules.
+
+See [SECURITY.md](SECURITY.md) and [docs/threat-model.md](docs/threat-model.md).
