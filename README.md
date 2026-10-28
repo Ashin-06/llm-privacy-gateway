@@ -109,3 +109,7 @@ The full list, key rotation and backups are covered in [docs/runbook.md](docs/ru
 - The code has not had an independent security review. Before handling real customer data it also needs keys in an HSM or KMS, single sign-on instead of static keys, and approval under the bank's data protection rules.
 
 See [SECURITY.md](SECURITY.md) and [docs/threat-model.md](docs/threat-model.md).
+
+## License
+
+MIT. See [LICENSE](LICENSE).
