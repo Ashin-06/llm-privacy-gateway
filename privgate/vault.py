@@ -41,7 +41,7 @@ class Vault:
         self.lookup_key = hashlib.sha256(b"privgate-lookup|" + key).digest()
         self.ttl = ttl_seconds
         self.db = engine or db.connect("sqlite://")
-        self._lock = threading.Lock()  # ponytail: per process; other replicas are caught by the table keys
+        self._lock = threading.Lock()  # Per process; other replicas are caught by the table keys
 
     @staticmethod
     def _norm(kind: str, value: str) -> str:
