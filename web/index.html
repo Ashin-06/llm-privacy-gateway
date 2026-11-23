@@ -85,11 +85,11 @@ $("scan").addEventListener("click", async () => {
   conversation = r.conversation;
   let html = "", last = 0;
   for (const e of r.entities) {
-    html += esc(text.slice(last, e.start)) + `<mark class="${e.action}" title="${esc(e.note || "")} · confidence ${e.confidence}">${esc(text.slice(e.start, e.end))}<small>${e.type}</small></mark>`;
+    html += esc(text.slice(last, e.start)) + `<mark class="${esc(e.action)}" title="${esc(e.note || "")} · confidence ${esc(e.confidence)}">${esc(text.slice(e.start, e.end))}<small>${esc(e.type)}</small></mark>`;
     last = e.end;
   }
   $("highlight").innerHTML = html + esc(text.slice(last));
-  $("blocked").innerHTML = r.blocked.length ? `<div class="warn">This prompt would be <b>refused</b>: it contains ${r.blocked.join(", ")}, which must never leave the bank.</div>` : "";
+  $("blocked").innerHTML = r.blocked.length ? `<div class="warn">This prompt would be <b>refused</b>: it contains ${esc(r.blocked.join(", "))}, which must never leave the bank.</div>` : "";
   $("sanitized").textContent = r.sanitized;
   $("reply").value = "Dear [[PERSON_1]],\n\nWe have reversed the duplicate charge on your card [[CARD_1:1111]]. The refund will reach account [[ACCOUNT_1:7812]] within 5 working days. We will update you on [[PHONE_1]].";
   ["found", "sent", "back"].forEach((id) => ($(id).hidden = false));
@@ -105,7 +105,7 @@ async function audit() {
   $("chain").innerHTML = a.verified ? '<span class="ok">· chain intact</span>' : '<span class="bad">· ' + esc(a.message) + "</span>";
   if (a.entries.length) {
     $("audit").innerHTML = "<tr><th>#</th><th>user / role</th><th>model</th><th>status</th><th>masked</th></tr>" + a.entries.slice().reverse().map((e) =>
-      `<tr><td>${e.seq}</td><td>${esc(e.user)} / ${esc(e.role)}</td><td>${esc(e.model)}</td><td>${esc(e.status)}</td><td>${esc(Object.entries(e.masked || {}).map(([k, v]) => k + "×" + v).join(", "))}</td></tr>`).join("");
+      `<tr><td>${esc(e.seq)}</td><td>${esc(e.user)} / ${esc(e.role)}</td><td>${esc(e.model)}</td><td>${esc(e.status)}</td><td>${esc(Object.entries(e.masked || {}).map(([k, v]) => k + "×" + v).join(", "))}</td></tr>`).join("");
   }
 }
 audit(); setInterval(audit, 5000);
